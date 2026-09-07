@@ -19,8 +19,9 @@ spec:
     spec:
       containers:
         - name: simplecasiocntr
-          image: dockermano1984/simplecasioimg:1.1
-          #image: dockermano1984/simplecasioimg:2.0
+          image: dockermano1984/simplecasioimg:1.2
+          # Always = pull from Docker Hub on every new pod (needs docker push in Jenkins first).
+          # Same tag is fine as long as Hub was updated before rollout restart.
           imagePullPolicy: Always
           ports:
             - containerPort: 80

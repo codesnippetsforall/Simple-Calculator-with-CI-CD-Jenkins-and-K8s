@@ -7,13 +7,18 @@ pipeline {
             defaultValue: false,
             description: 'Also run a local docker container on port 7070 (manual docker run step)'
         )
+        string(
+            name: 'DOCKERHUB_CREDENTIALS_ID',
+            defaultValue: 'dockerhub-credentials',
+            description: 'Jenkins Username/Password credentials ID for Docker Hub (docker login + push)'
+        )
     }
 
     environment {
         // Local build tag (manual: docker build -t simplecasioimg:1.0 .)
-        LOCAL_IMAGE    = 'simplecasioimg:1.0'
-        // Tag used by Deployment + minikube image load
-        DEPLOY_IMAGE   = 'dockermano1984/simplecasioimg:1.1'
+        LOCAL_IMAGE    = 'simplecasioimg:1.2'
+        // Must match simplecasio_deployment.yaml image:
+        DEPLOY_IMAGE   = 'dockermano1984/simplecasioimg:1.2'
         CONTAINER_NAME = 'simplecasiocntr'
         HOST_PORT      = '7070'
         K8S_DEPLOY     = 'simplecasio-deployment'
@@ -64,8 +69,25 @@ pipeline {
 
         stage('Tag Image') {
             steps {
-                echo "Tagging ${LOCAL_IMAGE} as ${DEPLOY_IMAGE} for Minikube / Deployment..."
+                echo "Tagging ${LOCAL_IMAGE} as ${DEPLOY_IMAGE} for Docker Hub / Deployment..."
                 sh 'docker tag ${LOCAL_IMAGE} ${DEPLOY_IMAGE}'
+            }
+        }
+
+        stage('Push Image to Docker Hub') {
+            steps {
+                echo "Pushing ${DEPLOY_IMAGE} so Minikube can pull the latest with imagePullPolicy: Always..."
+                withCredentials([usernamePassword(
+                    credentialsId: "${params.DOCKERHUB_CREDENTIALS_ID}",
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        docker push ${DEPLOY_IMAGE}
+                        docker logout || true
+                    '''
+                }
             }
         }
 
@@ -162,9 +184,11 @@ pipeline {
 
         stage('Load Image into Minikube') {
             steps {
-                echo "Loading ${DEPLOY_IMAGE} into Minikube (Docker Desktop does not share images automatically)..."
+                echo "Optional: load ${DEPLOY_IMAGE} into Minikube (Hub push is source of truth with Always)..."
                 sh '''
-                    minikube image load ${DEPLOY_IMAGE}
+                    # Not required when imagePullPolicy is Always + image was pushed,
+                    # but speeds first pull / helps if Hub is briefly slow.
+                    minikube image load ${DEPLOY_IMAGE} || true
                     minikube image ls | grep -i simplecasio || true
                 '''
             }
@@ -176,15 +200,18 @@ pipeline {
                 sh '''
                     kubectl apply -f ${K8S_MANIFEST}
 
-                    # apply alone restarts pods ONLY if the Pod template in the YAML changed.
-                    # HTML/image rebuilds that keep the same tag (e.g. :1.1) need an explicit restart
-                    # so Running pods pick up the freshly loaded image.
-                    echo "Rolling restart so pods use the latest loaded image..."
+                    # New pods pull from Docker Hub (imagePullPolicy: Always).
+                    # Restart is required when the image TAG is unchanged but Hub content changed.
+                    echo "Rolling restart so pods pull the latest pushed image..."
                     kubectl rollout restart deploy/${K8S_DEPLOY}
                     kubectl rollout status deploy/${K8S_DEPLOY} --timeout=180s
 
                     kubectl get deploy,rs,pods,svc -l app=simplecasio_lbl
                     kubectl get endpoints ${K8S_SERVICE} || true
+
+                    echo "Verify HTML version inside a running pod:"
+                    kubectl exec deploy/${K8S_DEPLOY} -- \
+                      grep -o "Simple calculator App[^<]*" /usr/local/apache2/htdocs/index.html || true
                 '''
             }
         }
