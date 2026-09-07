@@ -34,8 +34,8 @@ pipeline {
         MINIKUBE_MEMORY = '2000'
         // Stable public URL port (matches Service nodePort)
         BROWSER_PORT   = '30060'
-        // Filled in "Detect Public IP" stage (not hardcoded)
-        PUBLIC_HOST_IP = ''
+        // Do NOT declare PUBLIC_HOST_IP here — Declarative environment{} makes it hard/impossible
+        // to overwrite later. Detect Public IP stage sets env.PUBLIC_HOST_IP at runtime.
     }
 
     options {
@@ -55,48 +55,71 @@ pipeline {
         stage('Detect Public IP') {
             steps {
                 script {
-                    if (params.PUBLIC_HOST_IP_OVERRIDE?.trim()) {
-                        env.PUBLIC_HOST_IP = params.PUBLIC_HOST_IP_OVERRIDE.trim()
-                        echo "Using PUBLIC_HOST_IP override: ${env.PUBLIC_HOST_IP}"
+                    // Jenkins injects build params as env vars too; params.* can be null on some runs.
+                    def overrideIp = ''
+                    if (params?.PUBLIC_HOST_IP_OVERRIDE != null) {
+                        overrideIp = params.PUBLIC_HOST_IP_OVERRIDE.toString().trim()
+                    }
+                    if (!overrideIp && env.PUBLIC_HOST_IP_OVERRIDE) {
+                        overrideIp = env.PUBLIC_HOST_IP_OVERRIDE.toString().trim()
+                    }
+                    // Ignore literal "null" from bad binding
+                    if (overrideIp.equalsIgnoreCase('null')) {
+                        overrideIp = ''
+                    }
+
+                    echo "DEBUG params.PUBLIC_HOST_IP_OVERRIDE=[${params?.PUBLIC_HOST_IP_OVERRIDE}]"
+                    echo "DEBUG env.PUBLIC_HOST_IP_OVERRIDE=[${env.PUBLIC_HOST_IP_OVERRIDE}]"
+                    echo "DEBUG resolved overrideIp=[${overrideIp}]"
+
+                    def publicIp = overrideIp
+                    if (publicIp) {
+                        echo "Using PUBLIC_HOST_IP override: ${publicIp}"
                     } else {
-                        env.PUBLIC_HOST_IP = sh(
+                        publicIp = sh(
                             script: '''
                                 set +e
+                                export NO_PROXY="*"
+                                export no_proxy="*"
+                                CURL='curl --noproxy * -sS --connect-timeout 3 --max-time 5'
                                 IP=""
 
-                                # 1) EC2 Instance Metadata Service (IMDSv2, then IMDSv1)
-                                TOKEN=$(curl -sf --max-time 2 -X PUT "http://169.254.169.254/latest/api/token" \
+                                TOKEN=$($CURL -X PUT "http://169.254.169.254/latest/api/token" \
                                     -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
                                 if [ -n "$TOKEN" ]; then
-                                    IP=$(curl -sf --max-time 2 -H "X-aws-ec2-metadata-token: $TOKEN" \
-                                        http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
+                                    IP=$($CURL -H "X-aws-ec2-metadata-token: $TOKEN" \
+                                        http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null | tr -d '\\r\\n ')
                                 fi
                                 if [ -z "$IP" ]; then
-                                    IP=$(curl -sf --max-time 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
+                                    IP=$($CURL http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null | tr -d '\\r\\n ')
+                                fi
+                                if [ -z "$IP" ]; then
+                                    IP=$($CURL https://checkip.amazonaws.com 2>/dev/null | tr -d '\\r\\n ')
+                                fi
+                                if [ -z "$IP" ]; then
+                                    IP=$($CURL https://api.ipify.org 2>/dev/null | tr -d '\\r\\n ')
+                                fi
+                                if [ -z "$IP" ]; then
+                                    IP=$(hostname -I 2>/dev/null | awk '{print $1}' | tr -d '\\r\\n ')
                                 fi
 
-                                # 2) External echo services (works if metadata has no public IP / non-EC2)
-                                if [ -z "$IP" ]; then
-                                    IP=$(curl -sf --max-time 3 https://checkip.amazonaws.com 2>/dev/null | tr -d '\\r\\n')
-                                fi
-                                if [ -z "$IP" ]; then
-                                    IP=$(curl -sf --max-time 3 https://api.ipify.org 2>/dev/null | tr -d '\\r\\n')
-                                fi
-
-                                # 3) Last resort: primary host address (may be private)
-                                if [ -z "$IP" ]; then
-                                    IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-                                fi
-
+                                # Only print the IP (no other stdout) for returnStdout
                                 echo "$IP"
                             ''',
                             returnStdout: true
                         ).trim()
-                        echo "Detected PUBLIC_HOST_IP: ${env.PUBLIC_HOST_IP}"
+                        echo "Auto-detected PUBLIC_HOST_IP: ${publicIp}"
                     }
-                    if (!env.PUBLIC_HOST_IP?.trim()) {
-                        error('Could not determine PUBLIC_HOST_IP. Set build parameter PUBLIC_HOST_IP_OVERRIDE.')
+
+                    if (!publicIp || publicIp.equalsIgnoreCase('null')) {
+                        error('Could not determine PUBLIC_HOST_IP. Set PUBLIC_HOST_IP_OVERRIDE to your EC2 public IP and re-run.')
                     }
+
+                    // Persist for later stages / shell steps (must not be pre-declared in environment{})
+                    env.PUBLIC_HOST_IP = publicIp
+                    writeFile file: 'public-host-ip.txt', text: publicIp
+                    echo "PUBLIC_HOST_IP locked to: ${env.PUBLIC_HOST_IP}"
+                    archiveArtifacts artifacts: 'public-host-ip.txt', fingerprint: true
                 }
             }
         }
