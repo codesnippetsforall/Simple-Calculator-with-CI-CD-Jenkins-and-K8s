@@ -12,6 +12,11 @@ pipeline {
             defaultValue: 'DOCKERHUB_CREDENTIALS_ID',
             description: 'Jenkins Username/Password credentials ID for Docker Hub (docker login + push)'
         )
+        string(
+            name: 'PUBLIC_HOST_IP_OVERRIDE',
+            defaultValue: '',
+            description: 'Optional: force public IP for browser URL. Leave empty to auto-detect from EC2 / network.'
+        )
     }
 
     environment {
@@ -27,8 +32,10 @@ pipeline {
         MINIKUBE_K8S_VERSION = 'v1.32.0'
         MINIKUBE_CPUS  = '1'
         MINIKUBE_MEMORY = '2000'
-        // EC2 public IP — used in the final browser URL after minikube service --url
-        PUBLIC_HOST_IP = '43.204.100.183'
+        // Stable public URL port (matches Service nodePort)
+        BROWSER_PORT   = '30060'
+        // Filled in "Detect Public IP" stage (not hardcoded)
+        PUBLIC_HOST_IP = ''
     }
 
     options {
@@ -42,6 +49,55 @@ pipeline {
                 // Uses SCM configured on the Jenkins job (Pipeline script from SCM)
                 checkout scm
                 sh 'ls -la'
+            }
+        }
+
+        stage('Detect Public IP') {
+            steps {
+                script {
+                    if (params.PUBLIC_HOST_IP_OVERRIDE?.trim()) {
+                        env.PUBLIC_HOST_IP = params.PUBLIC_HOST_IP_OVERRIDE.trim()
+                        echo "Using PUBLIC_HOST_IP override: ${env.PUBLIC_HOST_IP}"
+                    } else {
+                        env.PUBLIC_HOST_IP = sh(
+                            script: '''
+                                set +e
+                                IP=""
+
+                                # 1) EC2 Instance Metadata Service (IMDSv2, then IMDSv1)
+                                TOKEN=$(curl -sf --max-time 2 -X PUT "http://169.254.169.254/latest/api/token" \
+                                    -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
+                                if [ -n "$TOKEN" ]; then
+                                    IP=$(curl -sf --max-time 2 -H "X-aws-ec2-metadata-token: $TOKEN" \
+                                        http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
+                                fi
+                                if [ -z "$IP" ]; then
+                                    IP=$(curl -sf --max-time 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
+                                fi
+
+                                # 2) External echo services (works if metadata has no public IP / non-EC2)
+                                if [ -z "$IP" ]; then
+                                    IP=$(curl -sf --max-time 3 https://checkip.amazonaws.com 2>/dev/null | tr -d '\\r\\n')
+                                fi
+                                if [ -z "$IP" ]; then
+                                    IP=$(curl -sf --max-time 3 https://api.ipify.org 2>/dev/null | tr -d '\\r\\n')
+                                fi
+
+                                # 3) Last resort: primary host address (may be private)
+                                if [ -z "$IP" ]; then
+                                    IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+                                fi
+
+                                echo "$IP"
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                        echo "Detected PUBLIC_HOST_IP: ${env.PUBLIC_HOST_IP}"
+                    }
+                    if (!env.PUBLIC_HOST_IP?.trim()) {
+                        error('Could not determine PUBLIC_HOST_IP. Set build parameter PUBLIC_HOST_IP_OVERRIDE.')
+                    }
+                }
             }
         }
 
@@ -196,12 +252,13 @@ pipeline {
 
         stage('Deploy Kubernetes') {
             steps {
-                echo "Applying Deployment + Service from ${K8S_MANIFEST}..."
+                echo "Applying Deployment + Service (RollingUpdate keeps Service available)..."
                 sh '''
                     kubectl apply -f ${K8S_MANIFEST}
 
-                    # New pods pull from Docker Hub (imagePullPolicy: Always).
-                    # Restart is required when the image TAG is unchanged but Hub content changed.
+                    # RollingUpdate (in YAML) + 3 replicas ≈ near zero downtime at Service/NodePort level.
+                    # Public URL downtime usually comes from killing port-forward — not from this restart —
+                    # if simplecasio-port-forward.service is installed with Restart=always.
                     echo "Rolling restart so pods pull the latest pushed image..."
                     kubectl rollout restart deploy/${K8S_DEPLOY}
                     kubectl rollout status deploy/${K8S_DEPLOY} --timeout=180s
@@ -218,62 +275,59 @@ pipeline {
 
         stage('Expose Service URL') {
             steps {
-                echo 'Getting URL from minikube service --url and publishing with EC2 public IP...'
+                echo 'Ensuring durable :30060 exposure (prefer systemd; avoid ephemeral port-forward)...'
                 sh '''
-                    set -e
                     set +e
+                    NODE_IP=$(minikube ip 2>/dev/null)
+                    NODE_PORT=$(kubectl get svc ${K8S_SERVICE} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
+                    NODE_PORT=${NODE_PORT:-${BROWSER_PORT}}
+                    MINIKUBE_URL="http://${NODE_IP}:${NODE_PORT}"
+                    BROWSER_URL="http://${PUBLIC_HOST_IP}:${BROWSER_PORT}/"
 
-                    echo "Running: minikube service ${K8S_SERVICE} --url"
-                    # Capture URL (may be http://127.0.0.1:PORT or http://192.168.x.x:NODEPORT)
-                    MINIKUBE_URL=$(minikube service ${K8S_SERVICE} --url 2>/tmp/minikube-service.err | head -n 1 | tr -d '\\r')
-                    if [ -z "${MINIKUBE_URL}" ]; then
-                        echo "minikube service --url returned empty; stderr:"
-                        cat /tmp/minikube-service.err 2>/dev/null || true
-                        # Fallback to NodePort on minikube ip
-                        NODE_IP=$(minikube ip)
-                        NODE_PORT=$(kubectl get svc ${K8S_SERVICE} -o jsonpath='{.spec.ports[0].nodePort}')
-                        MINIKUBE_URL="http://${NODE_IP}:${NODE_PORT}"
+                    echo "minikube NodePort URL (host-local only): ${MINIKUBE_URL}"
+                    echo "Browser URL: ${BROWSER_URL}"
+
+                    # Prefer systemd unit so the tunnel survives Jenkins builds (zero manual restart).
+                    if command -v systemctl >/dev/null 2>&1 && \
+                       systemctl list-unit-files simplecasio-port-forward.service 2>/dev/null | grep -q simplecasio-port-forward; then
+                        echo "Restarting systemd unit simplecasio-port-forward.service..."
+                        sudo -n systemctl restart simplecasio-port-forward.service 2>/dev/null \
+                          || sudo systemctl restart simplecasio-port-forward.service 2>/dev/null \
+                          || echo "WARN: could not restart systemd unit (install scripts/ + sudoers; see README)"
+                        sleep 2
+                        sudo -n systemctl is-active simplecasio-port-forward.service 2>/dev/null || true
+                    else
+                        # Fallback: only start nohup if nothing is listening yet (do NOT pkill a healthy forwarder)
+                        if curl -sf --max-time 3 "http://127.0.0.1:${BROWSER_PORT}/" >/dev/null 2>&1; then
+                            echo "Port ${BROWSER_PORT} already serving — leaving existing forwarder alone (no downtime)."
+                        else
+                            echo "No systemd unit found; starting background port-forward (may die when agent cleans up)."
+                            echo "Install durable exposure once: sudo bash scripts/install-port-forward-service.sh"
+                            nohup kubectl port-forward --address 0.0.0.0 svc/${K8S_SERVICE} ${BROWSER_PORT}:80 \
+                                >/tmp/simplecasio-port-forward.log 2>&1 &
+                            echo $! > /tmp/simplecasio-port-forward.pid
+                            sleep 3
+                        fi
                     fi
 
-                    echo "minikube service --url => ${MINIKUBE_URL}"
-
-                    # Extract port from URL (last :number)
-                    SVC_PORT=$(echo "${MINIKUBE_URL}" | sed -n 's/.*:\\([0-9][0-9]*\\).*/\\1/p')
-                    if [ -z "${SVC_PORT}" ]; then
-                        echo "ERROR: could not parse port from ${MINIKUBE_URL}"
-                        exit 1
-                    fi
-                    echo "Parsed service port: ${SVC_PORT}"
-
-                    # minikube tunnel/URL is usually localhost or cluster-IP only.
-                    # Re-expose the same PORT on 0.0.0.0 so http://PUBLIC_HOST_IP:PORT works from your browser.
-                    pkill -f "port-forward.*${K8S_SERVICE}" 2>/dev/null || true
-                    sleep 1
-                    nohup kubectl port-forward --address 0.0.0.0 svc/${K8S_SERVICE} ${SVC_PORT}:80 \
-                        >/tmp/simplecasio-port-forward.log 2>&1 &
-                    echo $! > /tmp/simplecasio-port-forward.pid
-                    sleep 3
-
-                    BROWSER_URL="http://${PUBLIC_HOST_IP}:${SVC_PORT}/"
                     echo "${BROWSER_URL}" > app-url.txt
                     echo "${MINIKUBE_URL}" > minikube-service-url.txt
 
-                    # Verify from the agent via localhost
-                    if curl -sf --max-time 8 "http://127.0.0.1:${SVC_PORT}/" >/dev/null; then
-                        echo "OK: app responds on 127.0.0.1:${SVC_PORT}"
+                    if curl -sf --max-time 8 "http://127.0.0.1:${BROWSER_PORT}/" >/dev/null; then
+                        echo "OK: app responds on 127.0.0.1:${BROWSER_PORT}"
                     else
-                        echo "WARN: localhost check failed; port-forward log:"
+                        echo "WARN: localhost :${BROWSER_PORT} not ready yet"
                         cat /tmp/simplecasio-port-forward.log 2>/dev/null || true
+                        sudo systemctl status --no-pager simplecasio-port-forward.service 2>/dev/null || true
                     fi
 
                     echo ""
                     echo "========== OPEN IN BROWSER =========="
-                    echo "minikube service --url : ${MINIKUBE_URL}"
-                    echo "Browser URL (EC2)      : ${BROWSER_URL}"
-                    echo "Allow inbound TCP ${SVC_PORT} in the EC2 security group for ${PUBLIC_HOST_IP}"
+                    echo "Browser URL (stable port): ${BROWSER_URL}"
+                    echo "Cluster NodePort (EC2 only): ${MINIKUBE_URL}"
+                    echo "SG: allow inbound TCP ${BROWSER_PORT}"
                     echo "====================================="
-                    echo ""
-                    curl -sf --max-time 8 "http://127.0.0.1:${SVC_PORT}/" | head -c 200 || true
+                    curl -sf --max-time 8 "http://127.0.0.1:${BROWSER_PORT}/" | head -c 200 || true
                     echo ""
                 '''
                 archiveArtifacts artifacts: 'app-url.txt,minikube-service-url.txt', fingerprint: true

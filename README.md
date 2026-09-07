@@ -226,14 +226,28 @@ curl http://192.168.49.2:30060/
 minikube service simplecasiopod-service --url
 ```
 
-**2. On EC2 — expose NodePort on all interfaces (keep this terminal open)**
+**2. On EC2 — durable public exposure (recommended; survives Jenkins builds)**
+
+One-time as root (from the repo on the server):
+
+```bash
+sudo bash scripts/install-port-forward-service.sh
+```
+
+This installs a **systemd** unit that runs:
+
+`kubectl port-forward --address 0.0.0.0 svc/simplecasiopod-service 30060:80`
+
+with `Restart=always`, so you should **not** need to run port-forward manually after each pipeline.
+
+Optional sudoers line (printed by the install script) lets the Jenkins job restart that unit without a password.
+
+**Ephemeral alternative** (breaks when the Jenkins process exits — causes the intermittent URL):
 
 ```bash
 sudo -u jenkins -i bash -c \
   'kubectl port-forward --address 0.0.0.0 svc/simplecasiopod-service 30060:80'
 ```
-
-You should see: `Forwarding from 0.0.0.0:30060 -> 80`.
 
 **3. EC2 security group**
 
@@ -245,7 +259,17 @@ Allow **inbound TCP 30060** to the instance (from your IP or temporarily `0.0.0.
 http://<EC2_PUBLIC_IP>:30060/
 ```
 
-Example: `http://43.204.100.183:30060/`
+Example: [http://43.204.100.183:30060/](http://43.204.100.183:30060/)
+
+**Zero-downtime notes**
+
+| Layer | Behavior |
+|--------|----------|
+| Deployment `RollingUpdate` + 3 replicas | Service keeps serving while pods roll — near zero app downtime |
+| Ephemeral `nohup` / manual port-forward | Dies with Jenkins/SSH session → URL flaps (not zero downtime) |
+| systemd `simplecasio-port-forward` | Tunnel stays up across builds → stable public URL |
+
+True production ZDD usually uses Ingress / LoadBalancer on a managed cluster, not Minikube port-forward.
 
 **Optional — SSH tunnel** (if you prefer not to open the SG port):
 

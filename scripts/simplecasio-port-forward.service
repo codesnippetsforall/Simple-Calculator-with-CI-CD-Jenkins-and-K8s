@@ -1,0 +1,21 @@
+[Unit]
+Description=Expose simplecasiopod-service on host :30060 (kubectl port-forward)
+Documentation=https://github.com/codesnippetsforall/simplehtmlcalcwithk8s
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jenkins
+Group=jenkins
+Environment=HOME=/var/lib/jenkins
+Environment=KUBECONFIG=/var/lib/jenkins/.kube/config
+# Bind on all interfaces so http://<EC2_PUBLIC_IP>:30060/ works
+ExecStart=/usr/bin/kubectl port-forward --address 0.0.0.0 svc/simplecasiopod-service 30060:80
+Restart=always
+RestartSec=3
+# Give kubectl a moment after Minikube/API flaps during rolling restarts
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target
