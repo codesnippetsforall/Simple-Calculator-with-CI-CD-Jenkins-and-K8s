@@ -1,0 +1,269 @@
+pipeline {
+    agent any
+
+    parameters {
+        booleanParam(
+            name: 'RUN_LOCAL_CONTAINER',
+            defaultValue: false,
+            description: 'Also run a local docker container on port 7070 (manual docker run step)'
+        )
+    }
+
+    environment {
+        // Local build tag (manual: docker build -t simplecasioimg:1.0 .)
+        LOCAL_IMAGE    = 'simplecasioimg:1.0'
+        // Tag used by Deployment + minikube image load
+        DEPLOY_IMAGE   = 'dockermano1984/simplecasioimg:1.1'
+        CONTAINER_NAME = 'simplecasiocntr'
+        HOST_PORT      = '7070'
+        K8S_DEPLOY     = 'simplecasio-deployment'
+        K8S_SERVICE    = 'simplecasiopod-service'
+        K8S_MANIFEST   = 'simplecasio_deployment.yaml'
+        MINIKUBE_K8S_VERSION = 'v1.32.0'
+        MINIKUBE_CPUS  = '2'
+        MINIKUBE_MEMORY = '4000'
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                // Uses SCM configured on the Jenkins job (Pipeline script from SCM)
+                checkout scm
+                sh 'ls -la'
+            }
+        }
+
+        stage('Code-Check') {
+            steps {
+                echo 'Checking required project files...'
+                sh '''
+                    test -f Dockerfile
+                    test -f index.html
+                    test -f "${K8S_MANIFEST}"
+                    echo "Dockerfile, index.html, and ${K8S_MANIFEST} are present"
+                '''
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                echo "Building Docker image ${LOCAL_IMAGE} (httpd:alpine + calculator)..."
+                sh '''
+                    docker build -t ${LOCAL_IMAGE} .
+                    docker images | grep -E "simplecasioimg|REPOSITORY" || true
+                '''
+            }
+        }
+
+        stage('Tag Image') {
+            steps {
+                echo "Tagging ${LOCAL_IMAGE} as ${DEPLOY_IMAGE} for Minikube / Deployment..."
+                sh 'docker tag ${LOCAL_IMAGE} ${DEPLOY_IMAGE}'
+            }
+        }
+
+        stage('Local Smoke (optional)') {
+            when {
+                expression { return params.RUN_LOCAL_CONTAINER == true }
+            }
+            steps {
+                echo "Running local container on port ${HOST_PORT}, verify briefly, then remove..."
+                sh '''
+                    docker rm -f ${CONTAINER_NAME} || true
+                    docker run -d -p ${HOST_PORT}:80 --name ${CONTAINER_NAME} ${LOCAL_IMAGE}
+
+                    echo "Waiting a few seconds for Apache to become ready..."
+                    sleep 5
+
+                    echo "Verifying container is running..."
+                    docker ps --filter "name=${CONTAINER_NAME}" --filter "status=running" | grep ${CONTAINER_NAME}
+
+                    echo "Verifying HTTP response on port ${HOST_PORT}..."
+                    curl -sf --max-time 10 "http://127.0.0.1:${HOST_PORT}/" | head -c 200
+                    echo ""
+                    echo "Local smoke OK: http://localhost:${HOST_PORT}/"
+
+                    echo "Removing local smoke container..."
+                    docker rm -f ${CONTAINER_NAME}
+                    docker ps -a --filter "name=${CONTAINER_NAME}" || true
+                '''
+            }
+        }
+
+        stage('Minikube Setup') {
+            steps {
+                echo "Ensuring Minikube is running (k8s ${MINIKUBE_K8S_VERSION})..."
+                // First-time start can download ISO/k8s components and take several minutes
+                timeout(time: 20, unit: 'MINUTES') {
+                    sh '''
+                        if ! command -v minikube >/dev/null 2>&1; then
+                            echo "ERROR: minikube not found on Jenkins agent PATH"
+                            exit 1
+                        fi
+                        if ! command -v kubectl >/dev/null 2>&1; then
+                            echo "ERROR: kubectl not found on Jenkins agent PATH"
+                            exit 1
+                        fi
+
+                        # Start only if not already running (first start may take a long time)
+                        if ! minikube status >/dev/null 2>&1; then
+                            echo "Starting Minikube (first run may download components — please wait)..."
+                            minikube start \
+                                --kubernetes-version=${MINIKUBE_K8S_VERSION} \
+                                --cpus=${MINIKUBE_CPUS} \
+                                --memory=${MINIKUBE_MEMORY} \
+                                --wait=all \
+                                --wait-timeout=600s
+                        else
+                            echo "Minikube already running"
+                            minikube status || true
+                        fi
+
+                        echo "Waiting for cluster API and node Ready (poll up to ~5 minutes)..."
+                        READY=0
+                        i=1
+                        while [ "${i}" -le 60 ]; do
+                            if minikube status >/dev/null 2>&1 \
+                               && kubectl get --raw=/readyz >/dev/null 2>&1 \
+                               && kubectl get nodes --no-headers 2>/dev/null | grep -qi ' Ready'; then
+                                READY=1
+                                echo "Cluster is ready (attempt ${i})"
+                                break
+                            fi
+                            echo "Not ready yet (attempt ${i}/60) — sleeping 5s..."
+                            sleep 5
+                            i=$((i + 1))
+                        done
+
+                        if [ "${READY}" != "1" ]; then
+                            echo "ERROR: Minikube/Kubernetes did not become Ready in time"
+                            minikube status || true
+                            kubectl get nodes -o wide || true
+                            exit 1
+                        fi
+
+                        # Brief settle delay before image load / kubectl apply
+                        sleep 10
+
+                        kubectl get nodes -o wide
+                        kubectl cluster-info || true
+                        echo "Minikube setup complete — safe to continue"
+                    '''
+                }
+            }
+        }
+
+        stage('Load Image into Minikube') {
+            steps {
+                echo "Loading ${DEPLOY_IMAGE} into Minikube (Docker Desktop does not share images automatically)..."
+                sh '''
+                    minikube image load ${DEPLOY_IMAGE}
+                    minikube image ls | grep -i simplecasio || true
+                '''
+            }
+        }
+
+        stage('Deploy Kubernetes') {
+            steps {
+                echo "Applying Deployment + Service from ${K8S_MANIFEST}..."
+                sh '''
+                    kubectl apply -f ${K8S_MANIFEST}
+
+                    # apply alone restarts pods ONLY if the Pod template in the YAML changed.
+                    # HTML/image rebuilds that keep the same tag (e.g. :1.1) need an explicit restart
+                    # so Running pods pick up the freshly loaded image.
+                    echo "Rolling restart so pods use the latest loaded image..."
+                    kubectl rollout restart deploy/${K8S_DEPLOY}
+                    kubectl rollout status deploy/${K8S_DEPLOY} --timeout=180s
+
+                    kubectl get deploy,rs,pods,svc -l app=simplecasio_lbl
+                    kubectl get endpoints ${K8S_SERVICE} || true
+                '''
+            }
+        }
+
+        stage('Expose Service URL') {
+            steps {
+                echo 'Resolving application URL via Minikube NodePort / service tunnel...'
+                sh '''
+                    set +e
+                    NODE_IP=$(minikube ip 2>/dev/null)
+                    NODE_PORT=$(kubectl get svc ${K8S_SERVICE} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
+                    echo "Minikube node IP: ${NODE_IP}"
+                    echo "Service NodePort: ${NODE_PORT}"
+
+                    APP_URL=""
+                    if [ -n "${NODE_IP}" ] && [ -n "${NODE_PORT}" ]; then
+                        APP_URL="http://${NODE_IP}:${NODE_PORT}/"
+                        echo "Trying NodePort URL: ${APP_URL}"
+                        if curl -sf --max-time 5 "${APP_URL}" >/dev/null 2>&1; then
+                            echo "${APP_URL}" > app-url.txt
+                        else
+                            echo "NodePort not directly reachable (common with Docker driver on Windows)."
+                            APP_URL=""
+                        fi
+                    fi
+
+                    # Fallback: minikube service --url
+                    if [ -z "${APP_URL}" ]; then
+                        TUNNEL_URL=$(minikube service ${K8S_SERVICE} --url 2>/dev/null | head -n 1)
+                        if [ -n "${TUNNEL_URL}" ]; then
+                            APP_URL="${TUNNEL_URL}"
+                            case "${APP_URL}" in
+                                */) ;;
+                                *) APP_URL="${APP_URL}/" ;;
+                            esac
+                            echo "${APP_URL}" > app-url.txt
+                            echo "Tunnel URL: ${APP_URL}"
+                        fi
+                    fi
+
+                    if [ ! -f app-url.txt ]; then
+                        echo "http://127.0.0.1:${NODE_PORT:-30060}/" > app-url.txt
+                        echo "Could not auto-verify reachability. Open with:"
+                        echo "  minikube service ${K8S_SERVICE}"
+                        echo "  (Windows Docker driver: leave that terminal open while browsing)"
+                    fi
+
+                    echo "========== APPLICATION URL =========="
+                    cat app-url.txt
+                    echo "====================================="
+
+                    URL=$(cat app-url.txt)
+                    curl -sf --max-time 10 "${URL}" | head -c 300 || echo "Smoke curl skipped/failed — open URL in browser after: minikube service ${K8S_SERVICE}"
+                    echo ""
+                '''
+                archiveArtifacts artifacts: 'app-url.txt', fingerprint: true
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                def url = fileExists('app-url.txt') ? readFile('app-url.txt').trim() : '(see console / minikube service)'
+                echo """
+============================================================
+Pipeline succeeded — Simple Casio calculator is deployed.
+Open in browser: ${url}
+
+If the page does not load (Docker driver on Windows):
+  minikube service ${env.K8S_SERVICE}
+  Keep that terminal open, then use the printed URL.
+============================================================
+"""
+            }
+        }
+        failure {
+            echo 'Pipeline failed. Ensure Docker Desktop, minikube, and kubectl are installed and available to the Jenkins agent user.'
+        }
+        always {
+            echo 'Pipeline finished.'
+        }
+    }
+}

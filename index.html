@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Simple Calculator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #070b14;
+      --card: rgba(18, 24, 40, 0.72);
+      --line: rgba(255, 255, 255, 0.08);
+      --text: #f4f7ff;
+      --muted: #93a0bf;
+      --accent: #6ee7ff;
+      --ok: #4ade80;
+      --danger: #fb7185;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      font-family: "DM Sans", system-ui, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      display: grid;
+      place-items: center;
+      padding: 25px;
+      overflow: hidden;
+    }
+
+    .aurora,
+    .aurora::before,
+    .aurora::after {
+      position: fixed;
+      inset: auto;
+      width: 42vw;
+      height: 42vw;
+      border-radius: 50%;
+      filter: blur(75px);
+      opacity: 0.55;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .aurora {
+      top: -12vw;
+      left: -8vw;
+      background: radial-gradient(circle, #2563eb 0%, transparent 70%);
+    }
+
+    .aurora::before {
+      content: "";
+      top: 48vh;
+      right: -10vw;
+      left: auto;
+      background: radial-gradient(circle, #7c3aed 0%, transparent 70%);
+    }
+
+    .aurora::after {
+      content: "";
+      bottom: -16vw;
+      left: 28vw;
+      background: radial-gradient(circle, #06b6d4 0%, transparent 70%);
+    }
+
+    .card {
+      position: relative;
+      z-index: 1;
+      width: min(380px, 100%);
+      padding: 32px 28px 24px;
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      background: var(--card);
+      backdrop-filter: blur(22px);
+      box-shadow:
+        0 30px 80px rgba(0, 0, 0, 0.45),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      animation: rise 0.7s ease both;
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(18px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 18px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: rgba(110, 231, 255, 0.1);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.7);
+      animation: pulse 1.8s infinite;
+    }
+
+    @keyframes pulse {
+      70% { box-shadow: 0 0 0 10px rgba(74, 222, 128, 0); }
+    }
+
+    h1 {
+      font-size: clamp(26px, 5vw, 34px);
+      line-height: 1.15;
+      margin-bottom: 8px;
+    }
+
+    .lede {
+      color: var(--muted);
+      margin-bottom: 22px;
+    }
+
+    .display {
+      padding: 18px 16px;
+      margin-bottom: 16px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
+      border: 1px solid var(--line);
+      text-align: right;
+      min-height: 92px;
+    }
+
+    .expression {
+      min-height: 20px;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 8px;
+      word-break: break-all;
+    }
+
+    .value {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: clamp(28px, 7vw, 36px);
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      background: linear-gradient(90deg, var(--accent), #c4b5fd);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      word-break: break-all;
+    }
+
+    .pad {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      border-radius: 14px;
+      height: 56px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 18px;
+      font-weight: 600;
+      transition: transform 0.15s ease, background 0.15s ease;
+    }
+
+    button:hover { background: rgba(255, 255, 255, 0.1); transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+
+    .op {
+      background: rgba(110, 231, 255, 0.12);
+      color: var(--accent);
+    }
+
+    .eq {
+      background: rgba(74, 222, 128, 0.16);
+      color: var(--ok);
+    }
+
+    .clear {
+      background: rgba(251, 113, 133, 0.12);
+      color: var(--danger);
+    }
+
+    .foot {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .pod-box {
+      margin-top: 16px;
+      padding: 14px 16px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .pod-box span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+
+    .pod-box strong {
+      display: block;
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+      word-break: break-all;
+    }
+
+    .pod-box .hint {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: 400;
+    }
+
+    @media (max-width: 520px) {
+      .card { padding: 24px 18px; }
+      button { height: 50px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="aurora"></div>
+  <main class="card">
+    <div class="eyebrow"><span class="dot"></span><span>Ready</span></div>
+    <h1>Simple calculator App 1.1</h1>
+    <p class="lede">Addition and subtraction only.</p>
+
+    <div class="display" aria-live="polite">
+      <div class="expression" id="expression"></div>
+      <div class="value" id="value">0</div>
+    </div>
+
+    <div class="pad">
+      <button type="button" data-digit="7">7</button>
+      <button type="button" data-digit="8">8</button>
+      <button type="button" data-digit="9">9</button>
+      <button type="button" class="op" data-op="+">+</button>
+
+      <button type="button" data-digit="4">4</button>
+      <button type="button" data-digit="5">5</button>
+      <button type="button" data-digit="6">6</button>
+      <button type="button" class="op" data-op="-">−</button>
+
+      <button type="button" data-digit="1">1</button>
+      <button type="button" data-digit="2">2</button>
+      <button type="button" data-digit="3">3</button>
+      <button type="button" class="eq" data-action="equals">=</button>
+
+      <button type="button" class="clear" data-action="clear">C</button>
+      <button type="button" data-digit="0">0</button>
+      <button type="button" data-digit=".">.</button>
+      <button type="button" class="clear" data-action="backspace">⌫</button>
+    </div>
+
+    <p class="foot">Use + and −, then press = to get the results.</p>
+
+    <div class="pod-box">
+      <span>Served by pod</span>
+      <strong id="podName">__POD_HOSTNAME__</strong>
+      <p class="hint" id="podHint">Refresh the page a few times — the Service may route you to a different replica.</p>
+    </div>
+  </main>
+
+  <script>
+    const valueEl = document.getElementById("value");
+    const expressionEl = document.getElementById("expression");
+
+    let current = "0";
+    let stored = null;
+    let operator = null;
+    let fresh = false;
+
+    function format(n) {
+      if (!Number.isFinite(n)) return "Error";
+      return String(Number(n.toPrecision(12)));
+    }
+
+    function render() {
+      valueEl.textContent = current;
+      expressionEl.textContent = stored !== null && operator
+        ? `${format(stored)} ${operator}`
+        : "";
+    }
+
+    function inputDigit(digit) {
+      if (digit === ".") {
+        if (fresh) {
+          current = "0.";
+          fresh = false;
+          render();
+          return;
+        }
+        if (current.includes(".")) return;
+        current += ".";
+        render();
+        return;
+      }
+
+      if (fresh || current === "0") {
+        current = digit;
+        fresh = false;
+      } else {
+        current += digit;
+      }
+      render();
+    }
+
+    function applyOp(nextOp) {
+      const n = Number(current);
+      if (stored === null) {
+        stored = n;
+      } else if (!fresh) {
+        stored = operator === "-" ? stored - n : stored + n;
+        current = format(stored);
+      }
+      operator = nextOp;
+      fresh = true;
+      render();
+    }
+
+    function equals() {
+      if (stored === null || operator === null || fresh) return;
+      const n = Number(current);
+      const result = operator === "-" ? stored - n : stored + n;
+      current = format(result);
+      stored = null;
+      operator = null;
+      fresh = true;
+      render();
+    }
+
+    function clearAll() {
+      current = "0";
+      stored = null;
+      operator = null;
+      fresh = false;
+      render();
+    }
+
+    function backspace() {
+      if (fresh) return;
+      current = current.length <= 1 ? "0" : current.slice(0, -1);
+      render();
+    }
+
+    document.querySelector(".pad").addEventListener("click", (event) => {
+      const btn = event.target.closest("button");
+      if (!btn) return;
+      if (btn.dataset.digit !== undefined) inputDigit(btn.dataset.digit);
+      if (btn.dataset.op) applyOp(btn.dataset.op);
+      if (btn.dataset.action === "equals") equals();
+      if (btn.dataset.action === "clear") clearAll();
+      if (btn.dataset.action === "backspace") backspace();
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key >= "0" && event.key <= "9") inputDigit(event.key);
+      else if (event.key === ".") inputDigit(".");
+      else if (event.key === "+") applyOp("+");
+      else if (event.key === "-") applyOp("-");
+      else if (event.key === "Enter" || event.key === "=") {
+        event.preventDefault();
+        equals();
+      } else if (event.key === "Backspace") backspace();
+      else if (event.key === "Escape") clearAll();
+    });
+  </script>
+</body>
+</html>

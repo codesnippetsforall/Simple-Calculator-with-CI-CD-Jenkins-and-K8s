@@ -1,0 +1,40 @@
+Start Docker Desktop
+Create simple calculator html file with Addition & Subtraction operation only in Version 1
+Use Docker image Apache to host this html in a container
+Create Dockerfile
+Add the Apache alphine image & index.html
+cd F:\learning\OneDrive\Documents\2026\simplehtmlcalcwithk8s
+docker build -t simplecasioimg:1.0 .
+docker tag simplecasioimg:1.0 dockeraccount/simplecasioimg:1.0
+docker run -d -p 7070:80 --name simplecasiocntr simplecasioimg:1.0
+Validate the result in browser -> http://localhost:7070/
+minikube start --kubernetes-version=v1.32.0 --cpus=2 --memory=4000
+kubectl get nodes
+kubectl get namespace or kubectl get ns
+kubectl get pods or kubectl get pod or kubectl get po
+kubectl get pod -o wide 
+kubectl get pod -A
+kubectl get replicaset or kubectl get rs
+kubectl get deployments or kubectl get deploy
+kubectl get services or kubectl get svc
+kubectl get deamonsets or kubectl get ds
+kubectl get configmaps or kubectl get cm
+kubectl get ingresses or kubectl get ingress or kubectl get ing
+kubectl get storageclasses or kubectl get storageclass or kubectl gt sc
+kubectl get statefulsets or kubectl get statefulset or kubectl get sts
+kubectl api-versions
+kubectl api-resources
+kubectl cluster-info
+kubectl get endpoints
+kubectl get pv
+kubectl get pvc
+kubectl get sts,pvc,pods
+kubectl get all
+kubectl apply -f .\simplecasio_deployment.yaml
+kubectl describe deployments
+kubectl delete deploy simplecasio-deployment
+minikube service simplecasiopod-service --url
+Note: http://127.0.0.1:55572
+      ❗  Because you are using a Docker driver on windows, the terminal needs to be open to run it.  
+kubectl rollout restart deploy simplecasio-deployment
+minikube image load dockeraccount/simplecasioimg:1.0
