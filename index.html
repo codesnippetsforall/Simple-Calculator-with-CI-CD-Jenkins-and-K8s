@@ -243,11 +243,11 @@
   <main class="card">
     <div class="eyebrow"><span class="dot"></span><span>Ready</span></div>
     <h1>Simple calculator App</h1>
-    <p class="lede">Addition and subtraction only.</p>
+    <p class="lede">Addition, subtraction, and multiplication.</p>
 
     <div class="display" aria-live="polite">
       <div class="expression" id="expression"></div>
-      <div class="value" id="value">0.0</div>
+      <div class="value" id="value">0</div>
     </div>
 
     <div class="pad">
@@ -264,15 +264,15 @@
       <button type="button" data-digit="1">1</button>
       <button type="button" data-digit="2">2</button>
       <button type="button" data-digit="3">3</button>
-      <button type="button" class="eq" data-action="equals">=</button>
+      <button type="button" class="op" data-op="*">×</button>
 
       <button type="button" class="clear" data-action="clear">C</button>
       <button type="button" data-digit="0">0</button>
       <button type="button" data-digit=".">.</button>
-      <button type="button" class="clear" data-action="backspace">⌫</button>
+      <button type="button" class="eq" data-action="equals">=</button>
     </div>
 
-    <p class="foot">Use + and −, then press = to get the results.</p>
+    <p class="foot">Use +, −, or ×, then press = to get the results. Backspace deletes the last digit.</p>
 
     <div class="pod-box">
       <span>Served by pod</span>
@@ -290,15 +290,23 @@
     let operator = null;
     let fresh = false;
 
-    function format(n) {
-      if (!Number.isFinite(n)) return "Error";
-      return String(Number(n.toPrecision(12)));
+    function opLabel(op) {
+      if (op === "*") return "×";
+      if (op === "-") return "−";
+      return op;
+    }
+
+    function compute(a, op, b) {
+      if (op === "+") return a + b;
+      if (op === "-") return a - b;
+      if (op === "*") return a * b;
+      return b;
     }
 
     function render() {
       valueEl.textContent = current;
       expressionEl.textContent = stored !== null && operator
-        ? `${format(stored)} ${operator}`
+        ? `${format(stored)} ${opLabel(operator)}`
         : "";
     }
 
@@ -330,7 +338,7 @@
       if (stored === null) {
         stored = n;
       } else if (!fresh) {
-        stored = operator === "-" ? stored - n : stored + n;
+        stored = compute(stored, operator, n);
         current = format(stored);
       }
       operator = nextOp;
@@ -341,8 +349,7 @@
     function equals() {
       if (stored === null || operator === null || fresh) return;
       const n = Number(current);
-      const result = operator === "-" ? stored - n : stored + n;
-      current = format(result);
+      current = format(compute(stored, operator, n));
       stored = null;
       operator = null;
       fresh = true;
@@ -378,6 +385,7 @@
       else if (event.key === ".") inputDigit(".");
       else if (event.key === "+") applyOp("+");
       else if (event.key === "-") applyOp("-");
+      else if (event.key === "*" || event.key === "x" || event.key === "X") applyOp("*");
       else if (event.key === "Enter" || event.key === "=") {
         event.preventDefault();
         equals();
