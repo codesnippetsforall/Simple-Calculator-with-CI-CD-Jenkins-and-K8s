@@ -20,7 +20,7 @@ pipeline {
         K8S_SERVICE    = 'simplecasiopod-service'
         K8S_MANIFEST   = 'simplecasio_deployment.yaml'
         MINIKUBE_K8S_VERSION = 'v1.32.0'
-        MINIKUBE_CPUS  = '2'
+        MINIKUBE_CPUS  = '1'
         MINIKUBE_MEMORY = '2000'
     }
 
