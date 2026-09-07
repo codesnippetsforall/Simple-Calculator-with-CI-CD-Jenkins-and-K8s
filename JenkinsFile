@@ -4,12 +4,12 @@ pipeline {
     parameters {
         booleanParam(
             name: 'RUN_LOCAL_CONTAINER',
-            defaultValue: false,
+            defaultValue: true,
             description: 'Also run a local docker container on port 7070 (manual docker run step)'
         )
         string(
             name: 'DOCKERHUB_CREDENTIALS_ID',
-            defaultValue: 'dockerhub-credentials',
+            defaultValue: 'DOCKERHUB_CREDENTIALS_ID',
             description: 'Jenkins Username/Password credentials ID for Docker Hub (docker login + push)'
         )
     }
