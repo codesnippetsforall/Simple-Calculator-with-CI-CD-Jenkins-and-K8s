@@ -22,6 +22,8 @@ pipeline {
         MINIKUBE_K8S_VERSION = 'v1.32.0'
         MINIKUBE_CPUS  = '1'
         MINIKUBE_MEMORY = '2000'
+        // EC2 public IP — used in the final browser URL after minikube service --url
+        PUBLIC_HOST_IP = '43.204.100.183'
     }
 
     options {
@@ -189,56 +191,65 @@ pipeline {
 
         stage('Expose Service URL') {
             steps {
-                echo 'Resolving application URL via Minikube NodePort / service tunnel...'
+                echo 'Getting URL from minikube service --url and publishing with EC2 public IP...'
                 sh '''
+                    set -e
                     set +e
-                    NODE_IP=$(minikube ip 2>/dev/null)
-                    NODE_PORT=$(kubectl get svc ${K8S_SERVICE} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
-                    echo "Minikube node IP: ${NODE_IP}"
-                    echo "Service NodePort: ${NODE_PORT}"
 
-                    APP_URL=""
-                    if [ -n "${NODE_IP}" ] && [ -n "${NODE_PORT}" ]; then
-                        APP_URL="http://${NODE_IP}:${NODE_PORT}/"
-                        echo "Trying NodePort URL: ${APP_URL}"
-                        if curl -sf --max-time 5 "${APP_URL}" >/dev/null 2>&1; then
-                            echo "${APP_URL}" > app-url.txt
-                        else
-                            echo "NodePort not directly reachable (common with Docker driver on Windows)."
-                            APP_URL=""
-                        fi
+                    echo "Running: minikube service ${K8S_SERVICE} --url"
+                    # Capture URL (may be http://127.0.0.1:PORT or http://192.168.x.x:NODEPORT)
+                    MINIKUBE_URL=$(minikube service ${K8S_SERVICE} --url 2>/tmp/minikube-service.err | head -n 1 | tr -d '\\r')
+                    if [ -z "${MINIKUBE_URL}" ]; then
+                        echo "minikube service --url returned empty; stderr:"
+                        cat /tmp/minikube-service.err 2>/dev/null || true
+                        # Fallback to NodePort on minikube ip
+                        NODE_IP=$(minikube ip)
+                        NODE_PORT=$(kubectl get svc ${K8S_SERVICE} -o jsonpath='{.spec.ports[0].nodePort}')
+                        MINIKUBE_URL="http://${NODE_IP}:${NODE_PORT}"
                     fi
 
-                    # Fallback: minikube service --url
-                    if [ -z "${APP_URL}" ]; then
-                        TUNNEL_URL=$(minikube service ${K8S_SERVICE} --url 2>/dev/null | head -n 1)
-                        if [ -n "${TUNNEL_URL}" ]; then
-                            APP_URL="${TUNNEL_URL}"
-                            case "${APP_URL}" in
-                                */) ;;
-                                *) APP_URL="${APP_URL}/" ;;
-                            esac
-                            echo "${APP_URL}" > app-url.txt
-                            echo "Tunnel URL: ${APP_URL}"
-                        fi
+                    echo "minikube service --url => ${MINIKUBE_URL}"
+
+                    # Extract port from URL (last :number)
+                    SVC_PORT=$(echo "${MINIKUBE_URL}" | sed -n 's/.*:\\([0-9][0-9]*\\).*/\\1/p')
+                    if [ -z "${SVC_PORT}" ]; then
+                        echo "ERROR: could not parse port from ${MINIKUBE_URL}"
+                        exit 1
+                    fi
+                    echo "Parsed service port: ${SVC_PORT}"
+
+                    # minikube tunnel/URL is usually localhost or cluster-IP only.
+                    # Re-expose the same PORT on 0.0.0.0 so http://PUBLIC_HOST_IP:PORT works from your browser.
+                    pkill -f "port-forward.*${K8S_SERVICE}" 2>/dev/null || true
+                    sleep 1
+                    nohup kubectl port-forward --address 0.0.0.0 svc/${K8S_SERVICE} ${SVC_PORT}:80 \
+                        >/tmp/simplecasio-port-forward.log 2>&1 &
+                    echo $! > /tmp/simplecasio-port-forward.pid
+                    sleep 3
+
+                    BROWSER_URL="http://${PUBLIC_HOST_IP}:${SVC_PORT}/"
+                    echo "${BROWSER_URL}" > app-url.txt
+                    echo "${MINIKUBE_URL}" > minikube-service-url.txt
+
+                    # Verify from the agent via localhost
+                    if curl -sf --max-time 8 "http://127.0.0.1:${SVC_PORT}/" >/dev/null; then
+                        echo "OK: app responds on 127.0.0.1:${SVC_PORT}"
+                    else
+                        echo "WARN: localhost check failed; port-forward log:"
+                        cat /tmp/simplecasio-port-forward.log 2>/dev/null || true
                     fi
 
-                    if [ ! -f app-url.txt ]; then
-                        echo "http://127.0.0.1:${NODE_PORT:-30060}/" > app-url.txt
-                        echo "Could not auto-verify reachability. Open with:"
-                        echo "  minikube service ${K8S_SERVICE}"
-                        echo "  (Windows Docker driver: leave that terminal open while browsing)"
-                    fi
-
-                    echo "========== APPLICATION URL =========="
-                    cat app-url.txt
+                    echo ""
+                    echo "========== OPEN IN BROWSER =========="
+                    echo "minikube service --url : ${MINIKUBE_URL}"
+                    echo "Browser URL (EC2)      : ${BROWSER_URL}"
+                    echo "Allow inbound TCP ${SVC_PORT} in the EC2 security group for ${PUBLIC_HOST_IP}"
                     echo "====================================="
-
-                    URL=$(cat app-url.txt)
-                    curl -sf --max-time 10 "${URL}" | head -c 300 || echo "Smoke curl skipped/failed — open URL in browser after: minikube service ${K8S_SERVICE}"
+                    echo ""
+                    curl -sf --max-time 8 "http://127.0.0.1:${SVC_PORT}/" | head -c 200 || true
                     echo ""
                 '''
-                archiveArtifacts artifacts: 'app-url.txt', fingerprint: true
+                archiveArtifacts artifacts: 'app-url.txt,minikube-service-url.txt', fingerprint: true
             }
         }
     }
@@ -246,15 +257,16 @@ pipeline {
     post {
         success {
             script {
-                def url = fileExists('app-url.txt') ? readFile('app-url.txt').trim() : '(see console / minikube service)'
+                def url = fileExists('app-url.txt') ? readFile('app-url.txt').trim() : '(missing app-url.txt)'
+                def mk = fileExists('minikube-service-url.txt') ? readFile('minikube-service-url.txt').trim() : '(n/a)'
                 echo """
 ============================================================
-Pipeline succeeded — Simple Casio calculator is deployed.
-Open in browser: ${url}
+Pipeline succeeded.
 
-If the page does not load (Docker driver on Windows):
-  minikube service ${env.K8S_SERVICE}
-  Keep that terminal open, then use the printed URL.
+minikube service --url : ${mk}
+Open in browser        : ${url}
+
+Open TCP for that port in EC2 security group (${env.PUBLIC_HOST_IP}).
 ============================================================
 """
             }

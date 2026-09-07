@@ -23,11 +23,14 @@ Local container on port **7070**:
 5. [Run locally with Docker](#run-locally-with-docker)
 6. [Push image to Docker Hub](#push-image-to-docker-hub)
 7. [Deploy on Minikube](#deploy-on-minikube)
-8. [Which pod serves the UI?](#which-pod-serves-the-ui)
-9. [Image updates (`imagePullPolicy`)](#image-updates-imagepullpolicy)
-10. [Useful kubectl commands](#useful-kubectl-commands)
-11. [Troubleshooting](#troubleshooting)
-12. [Setup cheat sheet](#setup-cheat-sheet)
+8. [View the app in a browser](#view-the-app-in-a-browser)
+9. [Run kubectl / inspect the cluster](#run-kubectl--inspect-the-cluster)
+10. [Jenkins CI/CD on EC2](#jenkins-cicd-on-ec2)
+11. [Which pod serves the UI?](#which-pod-serves-the-ui)
+12. [Image updates (`imagePullPolicy`)](#image-updates-imagepullpolicy)
+13. [Useful kubectl commands](#useful-kubectl-commands)
+14. [Troubleshooting](#troubleshooting)
+15. [Setup cheat sheet](#setup-cheat-sheet)
 
 ---
 
@@ -39,7 +42,7 @@ Local container on port **7070**:
 | `Dockerfile` | `httpd:alpine` + inject pod hostname at container start |
 | `simplecasio_deployment.yaml` | Deployment (3 replicas) + NodePort Service |
 | `Setup_Cheat_Sheet.info` | Quick command notes used during setup |
-| `JenkinsFile` | Older pipeline sample (still points at a previous repo; update before use) |
+| `JenkinsFile` | CI/CD pipeline: Docker build → Minikube → kubectl apply → expose URL |
 
 **Example values used in this project**
 
@@ -53,6 +56,8 @@ Local container on port **7070**:
 | NodePort | `30060` |
 | Service name | `simplecasiopod-service` |
 | Deployment name | `simplecasio-deployment` |
+| Example EC2 public IP | `43.204.100.183` (replace with yours) |
+| Jenkins job | `Simple-Calculator-with-CI-CD-Jenkins-and-K8s` |
 
 ---
 
@@ -64,7 +69,7 @@ Local container on port **7070**:
 ├── Dockerfile                      # httpd:alpine + hostname injection
 ├── simplecasio_deployment.yaml     # Deployment + Service
 ├── Setup_Cheat_Sheet.info          # Command notes
-├── JenkinsFile                     # Pipeline sample (update for this repo)
+├── JenkinsFile                     # Jenkins CI/CD (Docker + Minikube + K8s)
 ├── README.md
 └── reference/
     └── local-docker-build-calculator-v1.png
@@ -174,7 +179,7 @@ kubectl apply -f .\simplecasio_deployment.yaml
 kubectl get deploy,rs,pods,svc
 ```
 
-### 4. Open the app
+### 4. Open the app (local Minikube on your PC)
 
 ```powershell
 minikube service simplecasiopod-service --url
@@ -184,6 +189,8 @@ On Windows with the Docker driver, keep that terminal open while you browse the 
 
 You can also use NodePort `30060` via Minikube’s node IP (depending on driver/setup).
 
+> If Minikube runs on a **remote EC2** (Jenkins agent), see [View the app in a browser](#view-the-app-in-a-browser) — do **not** open `http://192.168.49.2:30060/` from your laptop.
+
 ### 5. Clean up deployment (optional)
 
 ```powershell
@@ -191,6 +198,149 @@ kubectl delete deploy simplecasio-deployment
 ```
 
 (The Service can remain, or delete it separately if needed.)
+
+---
+
+## View the app in a browser
+
+### Local PC (Docker / Minikube on the same machine)
+
+| How you ran it | Browser URL |
+|----------------|-------------|
+| `docker run -p 7070:80 ...` | [http://localhost:7070/](http://localhost:7070/) |
+| `minikube service simplecasiopod-service --url` | Use the printed URL (often `http://127.0.0.1:...`) |
+
+### Remote EC2 (Jenkins + Minikube on the server)
+
+Minikube’s node IP (example: `192.168.49.2`) is **only reachable inside the EC2 host**.  
+Your laptop browser cannot open `http://192.168.49.2:30060/`.
+
+**1. On EC2 — confirm the app answers inside the cluster network**
+
+```bash
+# Switch to the user that owns Minikube (Jenkins pipeline user)
+sudo -u jenkins -i bash
+
+curl http://192.168.49.2:30060/
+# or:
+minikube service simplecasiopod-service --url
+```
+
+**2. On EC2 — expose NodePort on all interfaces (keep this terminal open)**
+
+```bash
+sudo -u jenkins -i bash -c \
+  'kubectl port-forward --address 0.0.0.0 svc/simplecasiopod-service 30060:80'
+```
+
+You should see: `Forwarding from 0.0.0.0:30060 -> 80`.
+
+**3. EC2 security group**
+
+Allow **inbound TCP 30060** to the instance (from your IP or temporarily `0.0.0.0/0` for testing).
+
+**4. On your laptop browser**
+
+```text
+http://<EC2_PUBLIC_IP>:30060/
+```
+
+Example: `http://43.204.100.183:30060/`
+
+**Optional — SSH tunnel** (if you prefer not to open the SG port):
+
+```powershell
+ssh -L 30060:192.168.49.2:30060 <user>@<EC2_PUBLIC_IP>
+```
+
+Then open [http://127.0.0.1:30060/](http://127.0.0.1:30060/).
+
+---
+
+## Run kubectl / inspect the cluster
+
+### Important: use the Minikube owner user
+
+On the EC2 Jenkins host, Minikube and kubeconfig belong to the **`jenkins`** user.  
+As **`root`**, `kubectl` often has **no context** (or points at Jenkins HTML on port 8080) and fails.
+
+```bash
+# Enter a shell as jenkins
+sudo -u jenkins -i bash
+
+# Then run any kubectl / minikube commands
+minikube status
+kubectl get nodes
+kubectl get pods -o wide
+kubectl get deploy,rs,pods,svc
+kubectl get all
+```
+
+One-shot from root (no interactive shell):
+
+```bash
+sudo -u jenkins -i kubectl get nodes
+sudo -u jenkins -i kubectl get all
+sudo -u jenkins -i kubectl get pods -l app=simplecasio_lbl -o wide
+sudo -u jenkins -i kubectl describe deploy simplecasio-deployment
+sudo -u jenkins -i kubectl get endpoints simplecasiopod-service
+```
+
+### Cheat-sheet style inspection (as `jenkins`)
+
+```bash
+kubectl get nodes
+kubectl get ns
+kubectl get pods
+kubectl get pods -o wide
+kubectl get pods -A
+kubectl get rs
+kubectl get deploy
+kubectl get svc
+kubectl get ds
+kubectl get cm
+kubectl get ingress
+kubectl get sc
+kubectl get sts
+kubectl api-versions
+kubectl api-resources
+kubectl cluster-info
+kubectl get endpoints
+kubectl get pv
+kubectl get pvc
+kubectl get sts,pvc,pods
+kubectl get all
+```
+
+Keep **port-forward** in one SSH session and run these **`kubectl get`** commands in another session (also as `jenkins`).
+
+---
+
+## Jenkins CI/CD on EC2
+
+Pipeline file: [`JenkinsFile`](JenkinsFile).
+
+Typical flow:
+
+1. Checkout → code check → Docker build / tag  
+2. Optional local smoke container  
+3. Minikube start (as Jenkins agent user) → `minikube image load`  
+4. `kubectl apply` + `kubectl rollout restart`  
+5. Print browser URL using EC2 public IP + service port  
+
+**GitHub webhook** (job trigger; not the job page URL):
+
+```text
+http://<EC2_PUBLIC_IP>:8080/github-webhook/
+```
+
+Enable **GitHub hook trigger for GITScm polling** on the Jenkins job.  
+The webhook matches jobs by **repository URL**, not by job name in the path.
+
+**After a green build**
+
+- App (with port-forward + SG): `http://<EC2_PUBLIC_IP>:30060/`  
+- Cluster inspect: `sudo -u jenkins -i bash` then `kubectl get ...`
 
 ---
 
@@ -250,7 +400,9 @@ Hard-refresh the browser (`Ctrl+F5`) after deploy.
 
 ## Useful kubectl commands
 
-```powershell
+Run these on the machine where Minikube is running. On EC2 Jenkins, use `sudo -u jenkins -i bash` first (see [Run kubectl / inspect the cluster](#run-kubectl--inspect-the-cluster)).
+
+```bash
 kubectl get nodes
 kubectl get ns
 kubectl get pods -o wide
@@ -277,6 +429,18 @@ kubectl rollout status deploy/simplecasio-deployment
 - Avoid browser-blocked ports (e.g. `143`)
 - Test with: `curl http://127.0.0.1:<host-port>/`
 
+### Browser: `curl http://192.168.49.2:30060/` works on EC2 but laptop browser fails
+
+- `192.168.49.2` is Minikube’s **internal** Docker IP — laptop cannot reach it  
+- Use `kubectl port-forward --address 0.0.0.0 svc/simplecasiopod-service 30060:80` as **`jenkins`**  
+- Open `http://<EC2_PUBLIC_IP>:30060/` and allow TCP **30060** in the security group  
+
+### `kubectl` as root shows Jenkins HTML / “Authentication required” / no context
+
+- Minikube was started by **`jenkins`**; root has no valid kube context  
+- Fix: `sudo -u jenkins -i bash` then retry `kubectl get nodes`  
+- Do **not** run a second `minikube start` as root unless you intend a separate cluster  
+
 ### K8s still shows old HTML after rebuild
 
 - Same tag + `IfNotPresent` → node cache reused
@@ -284,13 +448,13 @@ kubectl rollout status deploy/simplecasio-deployment
 - Browser cache — use `Ctrl+F5`
 - Verify inside a pod:
 
-```powershell
-kubectl exec deploy/simplecasio-deployment -- cat /usr/local/apache2/htdocs/index.html | findstr /i "Served by pod POD_HOSTNAME"
+```bash
+kubectl exec deploy/simplecasio-deployment -- cat /usr/local/apache2/htdocs/index.html | grep -iE "Served by pod|POD_HOSTNAME"
 ```
 
 ### `minikube service ... --url` stops working
 
-With Docker driver on Windows, the tunnel needs the terminal left open.
+With Docker driver, the tunnel/session often needs the terminal left open.
 
 ### `kubectl apply` says Service `unchanged` but Deployment `configured`
 
@@ -313,11 +477,16 @@ Condensed from [`Setup_Cheat_Sheet.info`](Setup_Cheat_Sheet.info):
 9. `minikube service simplecasiopod-service --url`  
 10. For image refresh: push/load + `kubectl rollout restart deploy simplecasio-deployment`
 
+**On EC2 + Jenkins**
+
+11. Run kubectl as `jenkins`: `sudo -u jenkins -i bash`  
+12. Browser: port-forward `30060` + open `http://<EC2_PUBLIC_IP>:30060/`  
+
 ---
 
 ## Quick reference
 
-```powershell
+```bash
 # Local Docker
 docker build -t simplecasioimg:1.0 .
 docker run -d -p 7070:80 --name simplecasiocntr simplecasioimg:1.0
@@ -326,11 +495,15 @@ docker run -d -p 7070:80 --name simplecasiocntr simplecasioimg:1.0
 docker tag simplecasioimg:1.0 dockermano1984/simplecasioimg:1.1
 docker push dockermano1984/simplecasioimg:1.1
 
-# Minikube
+# Minikube (local or as jenkins on EC2)
 minikube start --kubernetes-version=v1.32.0 --cpus=2 --memory=4000
 minikube image load dockermano1984/simplecasioimg:1.1
-kubectl apply -f .\simplecasio_deployment.yaml
+kubectl apply -f simplecasio_deployment.yaml
 minikube service simplecasiopod-service --url
+
+# EC2: view in laptop browser (as jenkins; keep terminal open)
+kubectl port-forward --address 0.0.0.0 svc/simplecasiopod-service 30060:80
+# then open http://<EC2_PUBLIC_IP>:30060/
 ```
 
 ---
@@ -343,3 +516,4 @@ Learning demo for:
 - Docker Hub publish/pull
 - Minikube Deployments, ReplicaSets, Services
 - Multi-replica load balancing and identifying the serving pod
+- Jenkins CI/CD on EC2 with Minikube (browser access + kubectl as `jenkins`)
