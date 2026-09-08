@@ -160,11 +160,11 @@ pipeline {
                     # Install Trivy if missing (Linux amd64 Jenkins agent)
                     if ! command -v trivy >/dev/null 2>&1; then
                         echo "Trivy not found — installing..."
-                        TRIVY_VERSION=$(curl -sSF https://api.github.com/repos/aquasecurity/trivy/releases/latest | sed -n 's/.*"tag_name": *"v\\([^"]*\\)".*/\\1/p' | head -n1)
+                        TRIVY_VERSION=$(curl -sSf https://api.github.com/repos/aquasecurity/trivy/releases/latest | sed -n 's/.*"tag_name": *"v\\([^"]*\\)".*/\\1/p' | head -n1)
                         if [ -z "${TRIVY_VERSION}" ]; then
                             TRIVY_VERSION="0.58.1"
                         fi
-                        curl -sSF -L "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+                        curl -sSfL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
                             -o /tmp/trivy.tar.gz
                         tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
                         sudo mv /tmp/trivy /usr/local/bin/trivy || mv /tmp/trivy "${WORKSPACE}/trivy"
