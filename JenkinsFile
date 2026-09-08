@@ -17,6 +17,11 @@ pipeline {
             defaultValue: '',
             description: 'Optional: force public IP for browser URL. Leave empty to auto-detect from EC2 / network.'
         )
+        booleanParam(
+            name: 'TRIVY_FAIL_ON_HIGH',
+            defaultValue: false,
+            description: 'If true, fail the build when Trivy finds HIGH or CRITICAL vulnerabilities'
+        )
     }
 
     environment {
@@ -143,6 +148,74 @@ pipeline {
                     docker build -t ${LOCAL_IMAGE} .
                     docker images | grep -E "simplecasioimg|REPOSITORY" || true
                 '''
+            }
+        }
+
+        stage('Trivy Scan') {
+            steps {
+                echo "Running Trivy dependency / vulnerability scan on ${LOCAL_IMAGE}..."
+                sh '''
+                    set -e
+
+                    # Install Trivy if missing (Linux amd64 Jenkins agent)
+                    if ! command -v trivy >/dev/null 2>&1; then
+                        echo "Trivy not found — installing..."
+                        TRIVY_VERSION=$(curl -sSF https://api.github.com/repos/aquasecurity/trivy/releases/latest | sed -n 's/.*"tag_name": *"v\\([^"]*\\)".*/\\1/p' | head -n1)
+                        if [ -z "${TRIVY_VERSION}" ]; then
+                            TRIVY_VERSION="0.58.1"
+                        fi
+                        curl -sSF -L "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+                            -o /tmp/trivy.tar.gz
+                        tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+                        sudo mv /tmp/trivy /usr/local/bin/trivy || mv /tmp/trivy "${WORKSPACE}/trivy"
+                        export PATH="${WORKSPACE}:${PATH}:/usr/local/bin"
+                        rm -f /tmp/trivy.tar.gz
+                    fi
+
+                    trivy --version
+                    mkdir -p trivy-reports
+
+                    # 1) Scan workspace / project files (dependency & config issues)
+                    echo "=== Trivy filesystem / dependency scan ==="
+                    trivy fs \
+                        --scanners vuln,secret,misconfig \
+                        --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+                        --format table \
+                        --output trivy-reports/fs-report.txt \
+                        .
+                    trivy fs \
+                        --scanners vuln,secret,misconfig \
+                        --format json \
+                        --output trivy-reports/fs-report.json \
+                        . || true
+                    cat trivy-reports/fs-report.txt || true
+
+                    # 2) Scan the built Docker image (OS packages + app deps in image)
+                    echo "=== Trivy image scan: ${LOCAL_IMAGE} ==="
+                    EXIT_CODE=0
+                    if [ "${TRIVY_FAIL_ON_HIGH}" = "true" ]; then
+                        EXIT_CODE=1
+                    fi
+
+                    trivy image \
+                        --scanners vuln,secret,misconfig \
+                        --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+                        --format table \
+                        --output trivy-reports/image-report.txt \
+                        ${LOCAL_IMAGE} || true
+
+                    trivy image \
+                        --scanners vuln,secret,misconfig \
+                        --severity HIGH,CRITICAL \
+                        --format json \
+                        --output trivy-reports/image-report.json \
+                        --exit-code ${EXIT_CODE} \
+                        ${LOCAL_IMAGE}
+
+                    cat trivy-reports/image-report.txt || true
+                    echo "Trivy reports written under trivy-reports/"
+                '''
+                archiveArtifacts artifacts: 'trivy-reports/**', fingerprint: true, allowEmptyArchive: true
             }
         }
 
